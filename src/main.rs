@@ -1,5 +1,8 @@
 use engine::app::Application;
-use winit::{dpi::LogicalSize, event_loop::EventLoop};
+use winit::{
+    dpi::{LogicalSize, PhysicalSize, Size},
+    event_loop::EventLoop,
+};
 mod engine;
 
 fn main() {

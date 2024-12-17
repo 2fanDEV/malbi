@@ -20,11 +20,7 @@ impl ApplicationHandler for Application {
 
         self.window = Some(
             event_loop
-                .create_window(
-                    WindowAttributes::default()
-                        .with_max_inner_size(self.resolution)
-                        .with_active(true),
-                )
+                .create_window(WindowAttributes::default().with_inner_size(self.resolution))
                 .expect("Failed to create window"),
         );
         println!("window created");
