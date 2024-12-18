@@ -17,7 +17,6 @@ pub struct Application {
 impl ApplicationHandler for Application {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         println!("{:?}", self.resolution);
-
         self.window = Some(
             event_loop
                 .create_window(WindowAttributes::default().with_inner_size(self.resolution))
@@ -43,7 +42,6 @@ impl ApplicationHandler for Application {
         match event {
             WindowEvent::Destroyed => {
                 let _x = self.base_config.as_mut().unwrap();
-                drop(_x);
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();

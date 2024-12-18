@@ -1,7 +1,8 @@
 use core::ffi;
 use std::{
     borrow::Cow,
-    io::{Cursor, Error, ErrorKind}, process::Command,
+    io::{Cursor, Error, ErrorKind},
+    u64,
 };
 
 use ash::{
@@ -9,7 +10,27 @@ use ash::{
     khr::{surface, swapchain},
     util::read_spv,
     vk::{
-        self, ApplicationInfo, AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp, BlendFactor, BlendOp, ColorComponentFlags, ColorSpaceKHR, CommandBufferAllocateInfo, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsageFlags, CommandPool, CommandPoolCreateFlags, CommandPoolCreateInfo, ComponentMapping, ComponentSwizzle, CompositeAlphaFlagsKHR, CullModeFlags, DebugUtilsMessageSeverityFlagsEXT, DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT, DeviceCreateInfo, DeviceQueueCreateInfo, DynamicState, Extent2D, Format, Framebuffer, FramebufferCreateInfo, FrontFace, GraphicsPipelineCreateInfo, Handle, ImageAspectFlags, ImageLayout, ImageSubresourceRange, ImageUsageFlags, ImageView, ImageViewCreateInfo, InstanceCreateFlags, InstanceCreateInfo, LogicOp, Offset2D, PhysicalDevice, PhysicalDeviceType, Pipeline, PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState, PipelineColorBlendStateCreateInfo, PipelineDynamicStateCreateInfo, PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineMultisampleStateCreateInfo, PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateFlags, PipelineShaderStageCreateInfo, PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PolygonMode, PresentModeKHR, PrimitiveTopology, Queue, QueueFlags, Rect2D, RenderPass, RenderPassCreateInfo, SampleCountFlags, ShaderModuleCreateFlags, ShaderModuleCreateInfo, ShaderStageFlags, SharingMode, SubpassDescription, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR, SwapchainCreateInfoKHR, SwapchainKHR, Viewport, KHR_SWAPCHAIN_NAME
+        self, ApplicationInfo, AttachmentDescription, AttachmentLoadOp, AttachmentReference,
+        AttachmentStoreOp, BlendFactor, BlendOp, ColorComponentFlags, ColorSpaceKHR, CommandBuffer,
+        CommandBufferAllocateInfo, CommandBufferLevel, CommandBufferResetFlags, CommandPool,
+        CommandPoolCreateFlags, CommandPoolCreateInfo, ComponentMapping, ComponentSwizzle,
+        CompositeAlphaFlagsKHR, CullModeFlags, DebugUtilsMessageSeverityFlagsEXT,
+        DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCreateInfoEXT, DebugUtilsMessengerEXT,
+        DeviceCreateInfo, DeviceQueueCreateInfo, DynamicState, Extent2D, Fence, FenceCreateFlags,
+        FenceCreateInfo, Format, Framebuffer, FramebufferCreateInfo, FrontFace,
+        GraphicsPipelineCreateInfo, ImageAspectFlags, ImageLayout, ImageSubresourceRange,
+        ImageUsageFlags, ImageView, ImageViewCreateInfo, ImageViewType, InstanceCreateFlags,
+        InstanceCreateInfo, LogicOp, Offset2D, PhysicalDevice, PhysicalDeviceType, Pipeline,
+        PipelineBindPoint, PipelineCache, PipelineColorBlendAttachmentState,
+        PipelineColorBlendStateCreateInfo, PipelineDynamicStateCreateInfo,
+        PipelineInputAssemblyStateCreateInfo, PipelineLayout, PipelineMultisampleStateCreateInfo,
+        PipelineRasterizationStateCreateInfo, PipelineShaderStageCreateInfo,
+        PipelineVertexInputStateCreateInfo, PipelineViewportStateCreateInfo, PolygonMode,
+        PresentModeKHR, PrimitiveTopology, Queue, QueueFlags, Rect2D, RenderPass,
+        RenderPassCreateInfo, SampleCountFlags, Semaphore, SemaphoreCreateFlags,
+        SemaphoreCreateInfo, ShaderModuleCreateFlags, ShaderModuleCreateInfo, ShaderStageFlags,
+        SharingMode, SubpassDescription, SurfaceCapabilitiesKHR, SurfaceFormatKHR, SurfaceKHR,
+        SwapchainCreateInfoKHR, SwapchainKHR, Viewport, KHR_SWAPCHAIN_NAME,
     },
     Device, Entry, Instance,
 };
@@ -38,6 +59,15 @@ pub struct BaseConfig {
 
     swapchain_device: swapchain::Device,
     swapchain: SwapchainKHR,
+    command_pool: CommandPool,
+    command_buffer: Vec<CommandBuffer>,
+    image_views: Vec<ImageView>,
+    render_pass: RenderPass,
+    graphics_pipeline: Vec<Pipeline>,
+    framebuffers: Vec<Framebuffer>,
+    image_available_semaphore: Semaphore,
+    render_finished_semaphore: Semaphore,
+    in_flight_fence: Fence,
 }
 
 impl BaseConfig {
@@ -183,24 +213,38 @@ impl BaseConfig {
                                 .level_count(1)
                                 .base_array_layer(0)
                                 .layer_count(1),
-                        );
+                        )
+                        .view_type(ImageViewType::TYPE_2D)
+                        .format(surface_format.format);
                     device
                         .create_image_view(&create_info, None)
                         .expect("Failed to create image views")
                 })
                 .collect::<Vec<ImageView>>();
 
-            let render_pass = create_render_pass(&device, surface_format.format)
+            let render_pass = Self::create_render_pass(&device, surface_format.format)
                 .expect("Failed to create render pass");
 
-            let graphics_pipeline = create_graphics_pipeline(&device, swap_extent, render_pass)
-                .expect("Failed to create graphic pipeline");
+            let graphics_pipeline =
+                Self::create_graphics_pipeline(&device, swap_extent, render_pass)
+                    .expect("Failed to create graphics pipelines");
 
-            let framebuffers = create_framebuffers(&device, render_pass, swapchain_image_views, swap_extent);
+            let framebuffers = Self::create_framebuffers(
+                &device,
+                render_pass,
+                swapchain_image_views.clone(),
+                swap_extent,
+            );
 
-            let command_pool = create_command_pool(&instance);
-            
+            let command_pool = Self::create_command_pool(&device, queue_family_indexes[0] as u32);
 
+            let command_buffers = Self::create_command_buffer(&device, command_pool);
+
+            let image_available_semaphore = Self::create_semaphores(&device);
+
+            let render_finished_semaphore = Self::create_semaphores(&device);
+
+            let in_flight_fence = Self::create_fence(&device);
 
             Ok(Self {
                 instance: instance,
@@ -218,6 +262,15 @@ impl BaseConfig {
                 image_count: desired_image_count,
                 swapchain: swapchain,
                 swapchain_device: swapchain_device,
+                image_views: swapchain_image_views,
+                render_pass: render_pass,
+                graphics_pipeline: graphics_pipeline,
+                framebuffers: framebuffers,
+                command_pool: command_pool,
+                command_buffer: command_buffers,
+                image_available_semaphore: image_available_semaphore,
+                render_finished_semaphore: render_finished_semaphore,
+                in_flight_fence: in_flight_fence,
             })
         }
     }
@@ -458,194 +511,256 @@ impl BaseConfig {
             (formats, present_mode)
         }
     }
-}
 
-fn create_command_pool(device: &Device, queue_family_index : i32) -> CommandPool {
-    let command_pool_create_info = CommandPoolCreateInfo::default().flags(CommandPoolCreateFlags::RESET_COMMAND_BUFFER).queue_family_index(queue_family_index);
-    unsafe { device.create_command_pool(&command_pool_create_info, None).expect("Failed to initialize command pool") } 
-}
-
-fn create_command_buffer(device: &Device, command_pool: CommandPool) -> CommandBuffer { 
-    let command_buffer_create_info = CommandBufferAllocateInfo::default().command_pool(command_pool).level(CommandBufferLevel::PRIMARY);
-    unsafe { device.allocate_command_buffers(&command_buffer_create_info).expect("Failed to create command buffer") }
-}
-
-fn create_framebuffers(
-    device: &Device,
-    render_pass: RenderPass,
-    swapchain_images: Vec<ImageView>,
-    swapchain_extent: Extent2D,
-) -> Vec<Framebuffer> {
-    let mut framebuffers = Vec::new();
-    unsafe { 
-    for image_view in swapchain_images {
-        let image_view_vec = vec![image_view];
-        let frame_buffer_create_info = FramebufferCreateInfo::default()
-            .attachments(&image_view_vec)
-            .render_pass(render_pass)
-            .width(swapchain_extent.width)
-            .height(swapchain_extent.height)
-            .layers(1);
-
-        let framebuffer = device
-            .create_framebuffer(&frame_buffer_create_info, None)
-            .expect("Failed to create frame_buffer");
-
-        framebuffers.push(framebuffer);
+    fn create_semaphores(device: &Device) -> Semaphore {
+        let semaphore_create_info: SemaphoreCreateInfo =
+            SemaphoreCreateInfo::default().flags(SemaphoreCreateFlags::default());
+        unsafe {
+            device
+                .create_semaphore(&semaphore_create_info, None)
+                .expect("Failed to create sempahore")
+        }
     }
-    framebuffers
-}
 
-fn create_render_pass(
-    device: &Device,
-    swapchain_image_format: Format,
-) -> Result<RenderPass, vk::Result> {
-    unsafe {
-        let attachment_descriptions = vec![AttachmentDescription::default()
-            .format(swapchain_image_format)
-            .samples(SampleCountFlags::TYPE_1)
-            .load_op(AttachmentLoadOp::CLEAR)
-            .store_op(AttachmentStoreOp::STORE)
-            .stencil_load_op(AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(AttachmentStoreOp::DONT_CARE)
-            .initial_layout(ImageLayout::UNDEFINED)
-            .final_layout(ImageLayout::PRESENT_SRC_KHR)];
+    fn create_fence(device: &Device) -> Fence {
+        let fence_create_info = FenceCreateInfo::default().flags(FenceCreateFlags::SIGNALED);
+        unsafe {
+            device
+                .create_fence(&fence_create_info, None)
+                .expect("Failed to create fence")
+        }
+    }
 
-        let attachment_reference = vec![AttachmentReference::default()
-            .attachment(0)
-            .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
-        let subpass_description = vec![SubpassDescription::default()
-            .pipeline_bind_point(PipelineBindPoint::GRAPHICS)
-            .color_attachments(&attachment_reference)];
+    fn create_command_pool(device: &Device, queue_family_index: u32) -> CommandPool {
+        let command_pool_create_info = CommandPoolCreateInfo::default()
+            .flags(CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family_index as u32);
+        unsafe {
+            device
+                .create_command_pool(&command_pool_create_info, None)
+                .expect("Failed to initialize command pool")
+        }
+    }
 
-        let render_pass_create_info = RenderPassCreateInfo::default()
-            .subpasses(&subpass_description)
-            .attachments(&attachment_descriptions);
-        device.create_render_pass(&render_pass_create_info, None)
+    fn create_command_buffer(device: &Device, command_pool: CommandPool) -> Vec<CommandBuffer> {
+        let command_buffer_create_info = CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(CommandBufferLevel::PRIMARY);
+        unsafe {
+            device
+                .allocate_command_buffers(&command_buffer_create_info)
+                .expect("Failed to create command buffer")
+        }
+    }
+
+    fn create_framebuffers(
+        device: &Device,
+        render_pass: RenderPass,
+        swapchain_images: Vec<ImageView>,
+        swapchain_extent: Extent2D,
+    ) -> Vec<Framebuffer> {
+        let mut framebuffers = Vec::new();
+        unsafe {
+            for image_view in swapchain_images {
+                let image_view_vec = vec![image_view];
+                let frame_buffer_create_info = FramebufferCreateInfo::default()
+                    .attachments(&image_view_vec)
+                    .render_pass(render_pass)
+                    .width(swapchain_extent.width)
+                    .height(swapchain_extent.height)
+                    .layers(1);
+
+                let framebuffer = device
+                    .create_framebuffer(&frame_buffer_create_info, None)
+                    .expect("Failed to create frame_buffer");
+
+                framebuffers.push(framebuffer);
+            }
+            framebuffers
+        }
+    }
+
+    fn create_render_pass(
+        device: &Device,
+        swapchain_image_format: Format,
+    ) -> Result<RenderPass, vk::Result> {
+        unsafe {
+            let attachment_descriptions = vec![AttachmentDescription::default()
+                .format(swapchain_image_format)
+                .samples(SampleCountFlags::TYPE_1)
+                .load_op(AttachmentLoadOp::CLEAR)
+                .store_op(AttachmentStoreOp::STORE)
+                .stencil_load_op(AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(AttachmentStoreOp::DONT_CARE)
+                .initial_layout(ImageLayout::UNDEFINED)
+                .final_layout(ImageLayout::PRESENT_SRC_KHR)];
+
+            let attachment_reference = vec![AttachmentReference::default()
+                .attachment(0)
+                .layout(ImageLayout::COLOR_ATTACHMENT_OPTIMAL)];
+            let subpass_description = vec![SubpassDescription::default()
+                .pipeline_bind_point(PipelineBindPoint::GRAPHICS)
+                .color_attachments(&attachment_reference)];
+
+            let render_pass_create_info = RenderPassCreateInfo::default()
+                .subpasses(&subpass_description)
+                .attachments(&attachment_descriptions);
+            device.create_render_pass(&render_pass_create_info, None)
+        }
+    }
+
+    fn create_graphics_pipeline(
+        device: &Device,
+        swapchain_extend: Extent2D,
+        render_pass: RenderPass,
+    ) -> Result<Vec<Pipeline>, (Vec<Pipeline>, vk::Result)> {
+        unsafe {
+            let mut fragment_spv = Cursor::new(include_bytes!("../../shader/colors.spv").as_ref());
+            let mut vert_spv = Cursor::new(include_bytes!("../../shader/triangle.spv").as_ref());
+
+            let vert_code = read_spv(&mut vert_spv).expect("Failed to convert to code");
+            let frag_code = read_spv(&mut fragment_spv).expect("Failed to convert to code");
+
+            let vert_shader_create_info = ShaderModuleCreateInfo::default()
+                .code(&vert_code)
+                .flags(ShaderModuleCreateFlags::empty());
+            let frag_shader_create_info = ShaderModuleCreateInfo::default()
+                .code(&frag_code)
+                .flags(ShaderModuleCreateFlags::empty());
+
+            let vert_shader_module = device
+                .create_shader_module(&vert_shader_create_info, None)
+                .expect("Failed to create shader");
+            let fragment_shader_module = device
+                .create_shader_module(&frag_shader_create_info, None)
+                .expect("Failed to create shader");
+
+            let vert_shader_stage_info = PipelineShaderStageCreateInfo::default()
+                .stage(ShaderStageFlags::VERTEX)
+                .module(vert_shader_module);
+            let frag_shader_stage_info = PipelineShaderStageCreateInfo::default()
+                .stage(ShaderStageFlags::FRAGMENT)
+                .module(fragment_shader_module);
+
+            let shader_stages = vec![vert_shader_stage_info, frag_shader_stage_info];
+
+            let dynamic_states = vec![DynamicState::VIEWPORT, DynamicState::SCISSOR];
+
+            let pipeline_vertex_info = PipelineVertexInputStateCreateInfo::default();
+
+            let pipeline_input_assembly_info = PipelineInputAssemblyStateCreateInfo::default()
+                .topology(PrimitiveTopology::TRIANGLE_LIST)
+                .primitive_restart_enable(false);
+
+            let viewport = Viewport::default()
+                .x(0.0)
+                .y(0.0)
+                .width(swapchain_extend.width as f32)
+                .height(swapchain_extend.height as f32)
+                .min_depth(0.0)
+                .max_depth(1.0);
+
+            let viewports = vec![viewport];
+
+            let scissor = vec![Rect2D::default()
+                .offset(Offset2D::default().x(0).y(0))
+                .extent(swapchain_extend)];
+
+            let dynamic_states_info =
+                PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+            let viewports_pipeline_create_info = PipelineViewportStateCreateInfo::default()
+                .viewports(&viewports)
+                .scissors(&scissor);
+
+            let pipeline_rasterization_create_info =
+                PipelineRasterizationStateCreateInfo::default()
+                    .depth_clamp_enable(false)
+                    .rasterizer_discard_enable(false)
+                    .polygon_mode(PolygonMode::FILL)
+                    .line_width(1.0)
+                    .cull_mode(CullModeFlags::BACK)
+                    .front_face(FrontFace::CLOCKWISE)
+                    .depth_bias_clamp(0.0)
+                    .depth_bias_constant_factor(0.0)
+                    .depth_bias_slope_factor(0.0);
+
+            let multisample_create_info = PipelineMultisampleStateCreateInfo::default()
+                .sample_shading_enable(false)
+                .rasterization_samples(SampleCountFlags::TYPE_1)
+                .min_sample_shading(1.0)
+                .alpha_to_coverage_enable(false)
+                .alpha_to_one_enable(false);
+
+            let pipeline_color_blend_attachment =
+                vec![PipelineColorBlendAttachmentState::default()
+                    .blend_enable(false)
+                    .src_color_blend_factor(BlendFactor::ONE)
+                    .dst_color_blend_factor(BlendFactor::ZERO)
+                    .color_blend_op(BlendOp::ADD)
+                    .src_alpha_blend_factor(BlendFactor::ONE)
+                    .dst_alpha_blend_factor(BlendFactor::ZERO)
+                    .alpha_blend_op(BlendOp::ADD)
+                    .color_write_mask(
+                        ColorComponentFlags::R
+                            | ColorComponentFlags::G
+                            | ColorComponentFlags::B
+                            | ColorComponentFlags::A,
+                    )];
+
+            let color_blending = PipelineColorBlendStateCreateInfo::default()
+                .logic_op_enable(false)
+                .logic_op(LogicOp::COPY)
+                .attachments(&pipeline_color_blend_attachment)
+                .blend_constants([0.0, 0.0, 0.0, 0.0]);
+
+            let pipeline_layout = PipelineLayout::default();
+
+            let graphics_pipeline_create_info = vec![GraphicsPipelineCreateInfo::default()
+                .stages(&shader_stages)
+                .vertex_input_state(&pipeline_vertex_info)
+                .input_assembly_state(&pipeline_input_assembly_info)
+                .viewport_state(&viewports_pipeline_create_info)
+                .rasterization_state(&pipeline_rasterization_create_info)
+                .multisample_state(&multisample_create_info)
+                .color_blend_state(&color_blending)
+                .dynamic_state(&dynamic_states_info)
+                .render_pass(render_pass)
+                .subpass(0)
+                .layout(pipeline_layout)
+                .base_pipeline_handle(Pipeline::null())];
+
+            device.create_graphics_pipelines(
+                PipelineCache::null(),
+                &graphics_pipeline_create_info,
+                None,
+            )
+        }
     }
 }
 
-fn create_graphics_pipeline(
-    device: &Device,
-    swapchain_extend: Extent2D,
-    render_pass: RenderPass,
-) -> Result<Vec<Pipeline>, (Vec<Pipeline>, vk::Result)> {
-    unsafe {
-        let mut fragment_spv = Cursor::new(include_bytes!("../../shader/colors.spv").as_ref());
-        let mut vert_spv = Cursor::new(include_bytes!("../../shader/triangle.spv").as_ref());
+impl BaseConfig {
+    pub fn drawFrame(&self) {
+        let fences = vec![self.in_flight_fence];
+        unsafe {
+            self.device
+                .wait_for_fences(&fences, true, u64::MAX)
+                .unwrap();
 
-        let mut vert_code = read_spv(&mut vert_spv).expect("Failed to convert to code");
-        let mut frag_code = read_spv(&mut fragment_spv).expect("Failed to convert to code");
+            let next_images = self
+                .swapchain_device
+                .acquire_next_image(
+                    self.swapchain,
+                    u64::MAX,
+                    self.image_available_semaphore,
+                    self.in_flight_fence,
+                )
+                .expect("Failed to acquire next images");
 
-        let vert_shader_create_info = ShaderModuleCreateInfo::default()
-            .code(&vert_code)
-            .flags(ShaderModuleCreateFlags::empty());
-        let frag_shader_create_info = ShaderModuleCreateInfo::default()
-            .code(&frag_code)
-            .flags(ShaderModuleCreateFlags::empty());
-
-        let vert_shader_module = device
-            .create_shader_module(&vert_shader_create_info, None)
-            .expect("Failed to create shader");
-        let fragment_shader_module = device
-            .create_shader_module(&frag_shader_create_info, None)
-            .expect("Failed to create shader");
-
-        let vert_shader_stage_info = PipelineShaderStageCreateInfo::default()
-            .stage(ShaderStageFlags::VERTEX)
-            .module(vert_shader_module);
-        let frag_shader_stage_info = PipelineShaderStageCreateInfo::default()
-            .stage(ShaderStageFlags::FRAGMENT)
-            .module(fragment_shader_module);
-
-        let shader_stages = vec![vert_shader_stage_info, frag_shader_stage_info];
-
-        let dynamic_states = vec![DynamicState::VIEWPORT, DynamicState::SCISSOR];
-
-        let pipeline_vertex_info = PipelineVertexInputStateCreateInfo::default();
-
-        let pipeline_input_assembly_info = PipelineInputAssemblyStateCreateInfo::default()
-            .topology(PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
-        let viewport = Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(swapchain_extend.width as f32)
-            .height(swapchain_extend.height as f32)
-            .min_depth(0.0)
-            .max_depth(1.0);
-
-        let viewports = vec![viewport];
-
-        let scissor = vec![Rect2D::default()
-            .offset(Offset2D::default().x(0).y(0))
-            .extent(swapchain_extend)];
-
-        let dynamic_states_info =
-            PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let viewports_pipeline_create_info = PipelineViewportStateCreateInfo::default()
-            .viewports(&viewports)
-            .scissors(&scissor);
-
-        let pipeline_rasterization_create_info = PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(PolygonMode::FILL)
-            .line_width(1.0)
-            .cull_mode(CullModeFlags::BACK)
-            .front_face(FrontFace::CLOCKWISE)
-            .depth_bias_clamp(0.0)
-            .depth_bias_constant_factor(0.0)
-            .depth_bias_slope_factor(0.0);
-
-        let multisample_create_info = PipelineMultisampleStateCreateInfo::default()
-            .sample_shading_enable(false)
-            .rasterization_samples(SampleCountFlags::TYPE_1)
-            .min_sample_shading(1.0)
-            .alpha_to_coverage_enable(false)
-            .alpha_to_one_enable(false);
-
-        let pipeline_color_blend_attachment = PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
-            .src_color_blend_factor(BlendFactor::ONE)
-            .dst_color_blend_factor(BlendFactor::ZERO)
-            .color_blend_op(BlendOp::ADD)
-            .src_alpha_blend_factor(BlendFactor::ONE)
-            .dst_alpha_blend_factor(BlendFactor::ZERO)
-            .alpha_blend_op(BlendOp::ADD)
-            .color_write_mask(
-                ColorComponentFlags::R
-                    | ColorComponentFlags::G
-                    | ColorComponentFlags::B
-                    | ColorComponentFlags::A,
-            );
-
-        let color_blending = PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .logic_op(LogicOp::COPY)
-            .blend_constants([0.0, 0.0, 0.0, 0.0]);
-
-        let pipeline_layout = PipelineLayout::default();
-
-        let graphics_pipeline_create_info = vec![GraphicsPipelineCreateInfo::default()
-            .vertex_input_state(&pipeline_vertex_info)
-            .input_assembly_state(&pipeline_input_assembly_info)
-            .viewport_state(&viewports_pipeline_create_info)
-            .rasterization_state(&pipeline_rasterization_create_info)
-            .multisample_state(&multisample_create_info)
-            .color_blend_state(&color_blending)
-            .dynamic_state(&dynamic_states_info)
-            .render_pass(render_pass)
-            .subpass(0)
-            .base_pipeline_handle(Pipeline::null())];
-
-        device.create_graphics_pipelines(
-            PipelineCache::null(),
-            &graphics_pipeline_create_info,
-            None,
-        )
+            self.device
+                .reset_command_buffer(self.command_buffer[0], CommandBufferResetFlags::empty())
+                .expect("Failed to reset command buffer");
+        }
     }
 }
 
